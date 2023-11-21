@@ -15,6 +15,9 @@ from randomod.utilities import is_sequence_type
 from randomod.utilities import value_is_number
 
 
+_LEAP_YEAR = 2020
+
+
 class Day:
     """
     A simple wrapper around an integer value between 1 and 366 to represent a consistent number of a day of a year
@@ -26,39 +29,57 @@ class Day:
     LEAP_DAY_OR_FIRST_OF_MARCH = 60
 
     def __init__(
-            self,
-            day: typing.Union[
-                str,
-                pandas.Timestamp,
-                numpy.datetime64,
-                datetime,
-                int,
-                dict,
-                typing.Sequence[typing.Union[str, int]]]
+        self,
+        day: typing.Union[
+            str,
+            pandas.Timestamp,
+            numpy.datetime64,
+            datetime,
+            int,
+            dict,
+            typing.Sequence[typing.Union[str, int]]
+        ] = None,
+        *,
+        month_number: int = None,
+        day_number: int = None
     ):
-        if day is None:
-            raise ValueError("The day is not defined; 'None' has been passed.")
+        if isinstance(month_number, (int, float)) and month_number > 0:
+            if not isinstance(day_number, (int, float)) or day_number <= 0:
+                raise ValueError(
+                    f"A Day object may not be created - a valid month number was given but '{day_number}' "
+                    f"was passed as a day number, which isn't valid"
+                )
 
-        if is_sequence_type(day) and len(day) == 1:
-            day = day[0]
+            day = pandas.Timestamp(year=_LEAP_YEAR, month=int(month_number), day=int(day_number))
+        elif isinstance(day_number, (int, float)) and day_number > 0:
+            raise ValueError(
+                f"A day object may not be created - a valid day number was given but '{month_number} was passed as a "
+                f"month number, which isn't valid"
+            )
+        else:
+            if day is None:
+                raise ValueError("The day is not defined; 'None' has been passed.")
 
-        if is_sequence_type(day):
-            possible_args = [
-                int(float(argument))
-                for argument in day
-                if value_is_number(argument)
-            ]
-            if len(possible_args) == 1:
-                day = possible_args[0]
-            elif len(possible_args) == 2:
-                # We are going to interpret this as month-day
-                day = pandas.Timestamp(year=2020, month=possible_args[0], day=possible_args[1])
-            elif len(possible_args) > 3:
-                # We're going to interpret this as year-month-day. Further args may include time, but those are not
-                # important for this
-                day = pandas.Timestamp(year=possible_args[0], month=possible_args[1], day=possible_args[2])
-            else:
-                raise ValueError("A list of no numbers was passed; a Day cannot be interpretted.")
+            if is_sequence_type(day) and len(day) == 1:
+                day = day[0]
+
+            if is_sequence_type(day):
+                possible_args = [
+                    int(float(argument))
+                    for argument in day
+                    if value_is_number(argument)
+                ]
+                if len(possible_args) == 1:
+                    day = possible_args[0]
+                elif len(possible_args) == 2:
+                    # We are going to interpret this as month-day
+                    day = pandas.Timestamp(year=_LEAP_YEAR, month=possible_args[0], day=possible_args[1])
+                elif len(possible_args) > 3:
+                    # We're going to interpret this as year-month-day. Further args may include time, but those are not
+                    # important for this
+                    day = pandas.Timestamp(year=possible_args[0], month=possible_args[1], day=possible_args[2])
+                else:
+                    raise ValueError("A list of no numbers was passed; a Day cannot be interpretted.")
 
         if isinstance(day, str) and value_is_number(day):
             day = float(day)

@@ -5,15 +5,24 @@ from __future__ import annotations
 
 import io
 import os
+import pathlib
 import typing
 import re
+from collections.abc import ValuesView
+from collections.abc import ItemsView
+from collections.abc import KeysView
+from dataclasses import dataclass
+from dataclasses import field
 
 import pandas
+import pytz
+import requests
 
 from dateutil.parser import parse as parse_date
+from dateutil.tz import gettz
 from pandas._typing import ReadCsvBuffer
-from pydantic import BaseModel
-from pydantic import Field
+
+from randomod.utilities.day import Day
 
 SITE_TIMESERIES_ROW: re.Pattern = re.compile(r"# Data provided for site (?P<site_code>\d+)\s*")
 PARAMETER_CODE_PATTERN: re.Pattern = re.compile(r"#\s+\d+\s+(?P<pcode>\d{5})\s+(?P<description>.+)")
@@ -25,6 +34,12 @@ DATATYPE_PATTERN = re.compile(r"\d+(?P<datatype>[sdn])")
 HEADING_EXPLANATION_PATTERN = re.compile(
     r"#\s+(?P<column>[a-z0-9_]+)\s+(\.\.\.|--)\s+(?P<description>[-A-Za-z _.\[()\]]+)"
 )
+
+
+DEFAULT_SITE_NAME = "Default"
+
+
+T = typing.TypeVar("T")
 
 
 DATATYPE_FUNCTIONS = {
@@ -39,18 +54,89 @@ DATATYPE_TYPES = {
 }
 
 
-class RDBTimeSeries(BaseModel):
-    parse_dates: typing.List[str] = Field(default_factory=list)
-    dtypes: typing.Dict[str, typing.Type] = Field(default_factory=dict)
-    data_lines: typing.List[str] = Field(default_factory=list)
-    columns: typing.Dict[str, str] = Field(default_factory=dict)
-    site_code: typing.Optional[str] = Field(default=None)
-    location_name: typing.Optional[str] = Field(default=None)
+class FrameTransformation:
+    def __init__(
+        self,
+        column_name: str,
+        transformation: typing.Callable[[...], typing.Any]
+    ):
+        if not isinstance(transformation, typing.Callable):
+            raise TypeError(f"Transformation functions must be callables - received {type(transformation)} instead")
+
+        self.__function = transformation
+        self.__column_name = column_name
+
+    def __call__(self, frame: pandas.DataFrame) -> pandas.DataFrame:
+        frame[self.__column_name] = frame.apply(self.__function, axis=1)
+        return frame
+
+
+class NormalizeTimeZoneUnawareTransformation(FrameTransformation):
+    def __init__(self, to_column_name: str, date_column: str, timezone_code_column):
+        super().__init__(column_name=to_column_name, transformation=self.to_utc_unaware)
+        self.__date_column = date_column
+        self.__timezone_code_column = timezone_code_column
+
+    def to_utc_unaware(self, row) -> pandas.Timestamp:
+        date: pandas.Timestamp = row[self.__date_column]
+        timezone_code = row[self.__timezone_code_column]
+        timezone = gettz(timezone_code)
+        localized_date = date.tz_localize(timezone)
+        utc_date = localized_date.tz_convert(pytz.UTC)
+        return utc_date.tz_localize(None)
+
+
+class ToDayTransformation(FrameTransformation):
+    def __init__(
+        self,
+        to_column_name: str,
+        month_column: str = None,
+        day_column: str = None,
+        *,
+        date_column: str = None
+    ):
+        if None in (month_column, day_column) and date_column is None:
+            raise ValueError(
+                f"Either a date column or month and day column are required in order to "
+                f"transform values in a dataframe into a Day"
+            )
+        elif None not in (month_column, day_column) and date_column is not None:
+            raise ValueError(
+                f"A month and day column were passed into the Day transformation along with the name of the "
+                f"date column. These are mutually exclusive"
+            )
+        super().__init__(column_name=to_column_name, transformation=self.to_day)
+        self.__month_column = month_column
+        self.__day_column = day_column
+        self.__date_column = date_column
+
+    def to_day(self, row: typing.Mapping) -> Day:
+        if self.__month_column and self.__day_column:
+            month_number = row[self.__month_column]
+            day_number = row[self.__day_column]
+            return Day(month_number=month_number, day_number=day_number)
+        return Day(row[self.__date_column])
+
+
+@dataclass
+class RDBTable:
+    parse_dates: typing.List[str] = field(default_factory=list)
+    dtypes: typing.Dict[str, typing.Type] = field(default_factory=dict)
+    data_lines: typing.List[str] = field(default_factory=list)
+    columns: typing.Dict[str, str] = field(default_factory=dict)
+    site_code: typing.Optional[str] = field(default=None)
+    location_name: typing.Optional[str] = field(default=None)
+    post_processing_functions: typing.List[FrameTransformation] = field(default_factory=list)
 
     def to_frame(self) -> pandas.DataFrame:
         buffer: ReadCsvBuffer[str] = io.StringIO(os.linesep.join(self.data_lines))
 
-        creation_kwargs = {}
+        creation_kwargs = {
+            "na_values": [
+                "Dis",          # Record has been discontinued at the measurement site.
+                "Rat"           # Rating being developed
+            ]
+        }
 
         if self.dtypes:
             creation_kwargs['dtype'] = self.dtypes
@@ -58,11 +144,16 @@ class RDBTimeSeries(BaseModel):
         if self.parse_dates:
             creation_kwargs['parse_dates'] = self.parse_dates
 
-        return pandas.read_csv(
+        frame = pandas.read_csv(
             buffer,
             delimiter="\t",
             **creation_kwargs
         )
+
+        for transformation in self.post_processing_functions:
+            frame = transformation(frame=frame)
+
+        return frame
 
 
 def extract_key_value_pairs(
@@ -87,17 +178,33 @@ def extract_key_value_pairs(
 
 class RDB:
     @classmethod
-    def parse(cls, text: typing.Union[str, bytes]):
+    def from_path(cls, path: pathlib.Path, frame_processing_functions: typing.Iterable[FrameTransformation] = None) -> RDB:
+        text_data = path.read_text()
+        return cls(text_data, frame_processing_functions)
+
+    @classmethod
+    def from_url(cls, url: str, frame_processing_functions: typing.Iterable[FrameTransformation] = None) -> RDB:
+        with requests.get(url) as response:
+            if response.status_code < 400:
+                return cls(response.text, frame_processing_functions=frame_processing_functions)
+            raise Exception(str(response.text))
+
+    def __init__(self, text: typing.Union[str, bytes], frame_processing_functions: typing.Iterable[FrameTransformation] = None):
+        self.__timeseries: typing.Dict[RDBTable] = dict()
+        self.__default_data: typing.Optional[RDBTable] = None
+
+        if frame_processing_functions is None:
+            frame_processing_functions = []
+
         if isinstance(text, bytes):
             text = text.decode()
 
-        timeseries: typing.Dict[str, RDBTimeSeries] = {}
         locations: typing.Optional[typing.Dict[str, str]] = None
 
         columns: typing.List[str] = list()
         headings: typing.Dict[str, str] = dict()
 
-        active_site = "Unknown"
+        active_site = DEFAULT_SITE_NAME
         active_timeseries = None
 
         found_data = False
@@ -126,12 +233,18 @@ class RDB:
                     for entry in line.split("\t")
                 ]
                 found_data = False
-                active_timeseries = RDBTimeSeries(
+                active_timeseries = RDBTable(
                     site_code=active_site,
                     location_name=locations.get(active_site) if locations and active_site in locations else None,
-                    columns=headings
+                    columns=headings,
+                    post_processing_functions=frame_processing_functions
                 )
-                timeseries[active_site] = active_timeseries
+
+                if active_site == DEFAULT_SITE_NAME:
+                    self.__default_data = active_timeseries
+                else:
+                    self.__timeseries[active_site] = active_timeseries
+
                 active_timeseries.data_lines.insert(0, "\t".join(columns))
                 headings = {}
                 continue
@@ -162,7 +275,31 @@ class RDB:
 
             found_data = True
             active_timeseries.data_lines.append(line)
-        return timeseries
 
-    def __init__(self, text: str):
-        pass
+    def __getitem__(self, key) -> RDBTable:
+        return self.__timeseries[key]
+
+    def __len__(self):
+        return max(len(self.__timeseries), 1 if self.__default_data else 0)
+
+    @property
+    def default(self) -> typing.Optional[RDBTable]:
+        return self.__default_data
+
+    def get(self, key, __default: T = None) -> typing.Union[RDBTable, T]:
+        if key == DEFAULT_SITE_NAME:
+            return self.__default_data
+        return self.__timeseries.get(key, __default)
+
+    def items(self) -> ItemsView:
+        return self.__timeseries.items()
+
+    def keys(self) -> KeysView:
+        return self.__timeseries.keys()
+
+    def values(self) -> ValuesView[RDBTable]:
+        return self.__timeseries.values()
+
+    def __iter__(self):
+        return iter(self.__timeseries)
+

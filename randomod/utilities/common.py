@@ -1,12 +1,22 @@
 """
-@TODO: Put a module wide description here
+Common functions and classes used throughout the application
 """
 from __future__ import annotations
 
 import inspect
+import os
 import typing
-
+import functools
 import numpy
+
+from datetime import tzinfo
+
+
+@functools.cache
+def get_datetime_format(timezone: tzinfo) -> str:
+    if timezone is None:
+        return os.environ.get("RANDOMOD_DATETIME_TZ_UNAWARE_FORMAT", "%Y-%m-%d %H:%M+0000")
+    return os.environ.get("RANDOMOD_DATETIME_TZ_AWARE_FORMAT", "%Y-%m-%d %H:%M%z")
 
 
 def is_sequence_type(value: typing.Any) -> bool:
@@ -36,7 +46,7 @@ def value_is_number(value: typing.Any) -> bool:
         value: The value to check
 
     Returns:
-        Whether the value may be interpretted as a number
+        Whether the value may be interpreted as a number
     """
     if isinstance(value, str) and value.isnumeric():
         return True
