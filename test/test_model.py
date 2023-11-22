@@ -1,3 +1,6 @@
+"""
+Tests used to make sure that model calculations and the run model function work correctly
+"""
 import functools
 import typing
 import unittest
@@ -15,52 +18,116 @@ import test.utility
 from randomod.utilities import get_unique_sequence_values
 
 START_DATE = datetime(year=2023, month=10, day=8, hour=12)
+"""The start time for model input data"""
+
 END_DATE = datetime(year=2023, month=11, day=8, hour=12)
+"""The end time for model input data"""
+
 RESOLUTION = timedelta(hours=1)
+"""The amount of time between values generated observations"""
+
 THRESHOLD_COUNT = 5
+"""The number of generated thresholds to use"""
+
 THRESHOLD_VALUE_ADJUSTER = 8
+"""
+A value used to adjust threshold bounds to ensure that threshold bounds are always over the greatest value 
+for a set of observations
+"""
+
 MINIMUM_VALUE = 15
+"""The smallest value that may be generated"""
+
 MAXIMUM_VALUE = 150
+"""The largest value that may be generated"""
+
 EPSILON_DIGITS = 4
+"""The number of digits to use when comparing generated output and expected output"""
+
 LOCATIONS = [
     f"location_{index}"
     for index in range(1, 201)
 ]
+"""The locations to generate data for"""
 
 test.utility.apply_seed()
 
 
 def next_generated_value(random_number_generator: random.Random, previous_value: float = None) -> float:
+    """
+    Generates a new value in relation to the previous
+
+    :param random_number_generator: The random number generator responsible for determining values
+    :param previous_value: The value to use as the root of the next value
+    :return: A random value
+    """
     if previous_value is None:
+        # If no value was passed (generally the case for the first value), generate a value in relation to the
+        # midpoint of the minimum and maximum
         previous_value = (MINIMUM_VALUE + MAXIMUM_VALUE) / 2.0
 
+    # Create a range of values for the generated value that expand from a range half of the previous value below it
+    # to half the previous value above it.
+    # If the previous value were 40, for instance, the range for the next value would be [20, 60]
+    # This approach generates wild behavior at larger values, so that might need to be addressed so that values don't
+    # look ridiculous
     half_below = previous_value / 2.0
     half_above = previous_value + half_below
 
+    # If the range might extend below the minimum value, shift the range up
     if half_below < MINIMUM_VALUE:
         difference = half_above - half_below
         half_below = MINIMUM_VALUE
         half_above = MINIMUM_VALUE + difference
     elif half_above > MAXIMUM_VALUE:
+        # If the range might extend above the maximum value, shift the range down
         difference = half_above - half_below
         half_above = MAXIMUM_VALUE
         half_below = MAXIMUM_VALUE - difference
 
+    # Choose a random value from within the range of the minimum and maximum and the half steps generated above
     return random_number_generator.uniform(
         min(MINIMUM_VALUE, half_below),
         max(MAXIMUM_VALUE, half_above)
     )
 
 
-def create_threshold_value_table(row_count: int, threshold_values: typing.List[float], random_number_generator: random.Random) -> pandas.DataFrame:
+def create_threshold_value_table(
+    row_count: int,
+    threshold_values: typing.List[float],
+    random_number_generator: random.Random
+) -> pandas.DataFrame:
+    """
+    Create a table containing values to be joined to generated metadata to serve as thresholds
+
+    :param row_count: The number of threshold sets to generate
+    :param threshold_values: The generated center points for each stage of the thresholds
+    :param random_number_generator: A random number generator used to generate semi-reliable values
+    :return: A table containing thresholds that may be merged with metadata used as indices
+    """
     threshold_value_input = {}
+
+    # Loop through each established threshold and create random values rooted around and established
+    # threshold center point
+    # Create values that will align with the established row count
     for threshold_index, center_value in enumerate(threshold_values):
+        # First establish a name for the threshold
         threshold_number = str(threshold_index + 1)
         threshold_name = "threshold_" + threshold_number
+
+        # Create an adjustment value to ensure that thresholds may reliably encompass generated values
+        # If the center value was 40, this would give us 10
         adjustment_amount = 0.25
         adjustment = center_value * adjustment_amount
+
+        # The bounds for the random number generator will now be created by generating random bounds based on the
+        # threshold center points
+        # If the center value for the threshold being generated is 40, this will give us a range of bounds for our
+        # final lower bound from [30, 50]
         lower_lower_bound = center_value - adjustment
         upper_lower_bound = center_value + adjustment
+
+        # Lower bounds for generation will be generated based on those bounds for every expected row
         lower_bounds = [
             random_number_generator.uniform(
                 lower_lower_bound,
@@ -68,15 +135,23 @@ def create_threshold_value_table(row_count: int, threshold_values: typing.List[f
             )
             for _ in range(row_count)
         ]
+
+        # Now establish upper bounds based on the generated bound for each lower bound
+        # If a generated lower bound was 32.5, this will give us a range of potential upper bounds from
+        # [32.75, 42.5]. The adjustment amount is added to the lower bound to ensure that the upper bound is
+        # never equal to the lower bound
         upper_bounds = [
-            random_number_generator.uniform(lower_bound, lower_bound + adjustment)
+            random_number_generator.uniform(lower_bound + adjustment_amount, lower_bound + adjustment)
             for lower_bound in lower_bounds
         ]
 
+        # Now use the generated upper and lower bounds to generate values for each expected row
         threshold_value_input[threshold_name] = [
             random_number_generator.uniform(lower_bound, upper_bound)
             for lower_bound, upper_bound in zip(lower_bounds, upper_bounds)
         ]
+
+    # Return the data in a dataframe for efficient joining
     return pandas.DataFrame(threshold_value_input)
 
 
@@ -89,18 +164,39 @@ def make_thresholds_for_location(
     by_time: bool = None,
     time_column: str = None
 ) -> pandas.DataFrame:
+    """
+    Make a table describing thresholds for a location based on 'observed' values
+
+    :param observation_data: The values that are considered to be true and reasonable for the given location
+    :param location: The name of the location
+    :param location_column: The name of the column where the location name should lie
+    :param value_column: The name of the column where the observed value may be found
+    :param random_number_generator: A random number generator used to make semi-reliable data
+    :param by_time: Whether to include the time dimension when generating values. This helps mimic variable percentiles
+    :param time_column: The column to use that will help identify the time to use when generating time-based thresholds
+    :return: A dataframe used to serve as artificial thresholds for a location based on observation data
+    """
     values = observation_data[value_column]
 
     minimum_value = values.min()
     maximum_value = values.max()
 
+    threshold_width = minimum_value + (minimum_value + maximum_value - THRESHOLD_VALUE_ADJUSTER) / THRESHOLD_COUNT
+    """The expected width of each range of allowable threshold values"""
+
+    # Create a series of equidistant values to serve as threshold boundaries that will ALWAYS exceed the minimum and
+    # maximum values
     threshold_values = [
-        minimum_value + (
-                (minimum_value + maximum_value - THRESHOLD_VALUE_ADJUSTER) / THRESHOLD_COUNT
-        ) * threshold_index
+        threshold_width * threshold_index
         for threshold_index in range(1, THRESHOLD_COUNT + 1)
     ]
 
+    # If there is multiple indices, we're likely working with a location and time and will need to step through the
+    # index differently as compared to a single index since it will be multidimensional
+    # Given a 1-dimensional index named 'location' with a single value of 'location_1', the multiindex logic will
+    # yield an index of {'location': 'l'}. If the logic for single indexed values is used on multiindexed values of
+    # [{location: (location1, date1)}, {location: (location1, date2)}, ...] where we need
+    # [{location: location1, date: date1}, {location: location1, date: date2}, ...]
     if isinstance(observation_data.index, pandas.MultiIndex):
         threshold_frame_contents = get_unique_sequence_values([
             {
@@ -117,17 +213,23 @@ def make_thresholds_for_location(
             for value in observation_data.index
         ])
 
+    # Make sure that the location is added if it somehow hasn't yet
     for row in threshold_frame_contents:
         if location_column not in row:
             row[location_column] = location
 
+    # Add the time if it hasn't been added
     if by_time and time_column in observation_data:
         for row, time_value in zip(threshold_frame_contents, observation_data[time_column]):
             if time_column not in row:
                 row[time_column] = time_value
 
     threshold_frame = pandas.DataFrame(threshold_frame_contents)
-    raw_threshold_values = create_threshold_value_table(threshold_frame.shape[0], threshold_values, random_number_generator)
+    raw_threshold_values = create_threshold_value_table(
+        threshold_frame.shape[0],
+        threshold_values,
+        random_number_generator
+    )
     threshold_frame = threshold_frame.join(raw_threshold_values)
     threshold_frame = threshold_frame.set_index(
         keys=[location_column, time_column] if by_time else [location_column],
