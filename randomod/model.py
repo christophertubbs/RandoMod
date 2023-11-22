@@ -39,6 +39,7 @@ def calculate_values(
     value_column: str,
     random_number_generator: typing.Union[Random, int] = None
 ) -> typing.Sequence[typing.Dict[str, typing.Union[float, str, datetime]]]:
+    print(f"Modelling data for {location}")
     if random_number_generator is None or isinstance(random_number_generator, int):
         random_number_generator = Random(random_number_generator)
 
@@ -50,6 +51,7 @@ def calculate_values(
     final_threshold_index = len(threshold_names) - 1
     previous_modelled_value = numpy.nan
 
+    model_start_time = datetime.now()
     for index, row in group.iterrows():
         current_time = row[time_column]
 
@@ -165,6 +167,8 @@ def calculate_values(
 
         new_values.append(new_value)
 
+    duration = datetime.now() - model_start_time
+    print(f"{len(new_values)} generated for {location} in {duration}")
     return new_values
 
 
@@ -177,6 +181,8 @@ def run_model(
     value_column: str,
     random_number_generator: typing.Union[Random, int] = None
 ) -> pandas.DataFrame:
+    if control_and_thresholds.index.names != [location_column]:
+        control_and_thresholds = control_and_thresholds.reset_index().set_index(location_column)
 
     with multiprocessing.Pool() as process_pool:
         arguments = [
@@ -192,15 +198,16 @@ def run_model(
                 ]
                 for group_details, group in control_and_thresholds.groupby(location_column)  # type: typing.Tuple[str], pandas.DataFrame
             ]
+
         simulation_per_location = process_pool.starmap(
             calculate_values,
             arguments
         )
 
-    frames = [pandas.DataFrame(location_data) for location_data in simulation_per_location]
-
-    combined_frames = functools.reduce(
-        lambda first_frame, second_frame: pandas.concat([first_frame, second_frame]),
-        frames
+    combined_simulated_data = functools.reduce(
+        lambda accumulated_data, new_data: accumulated_data + new_data,
+        simulation_per_location
     )
+
+    combined_frames = pandas.DataFrame(combined_simulated_data).set_index(location_column)
     return combined_frames

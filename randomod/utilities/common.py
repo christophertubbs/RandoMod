@@ -56,3 +56,26 @@ def value_is_number(value: typing.Any) -> bool:
         return True
 
     return isinstance(value, int) or isinstance(value, float) or isinstance(value, complex)
+
+
+T = typing.TypeVar("T")
+
+
+def get_unique_sequence_values(data: typing.Iterable[T]) -> typing.List[T]:
+    def _accumulate_data(accumulated_data: typing.List[T], next_value: T) -> typing.List[T]:
+        return accumulated_data + [next_value] if next_value not in accumulated_data else accumulated_data
+
+    new_collection = functools.reduce(_accumulate_data, data, [])
+    return new_collection
+
+
+def merge(original_dictionary: typing.Mapping = None, new_values: typing.Mapping = None, **kwargs) -> typing.Dict:
+    if original_dictionary is None:
+        original_dictionary = {}
+
+    if new_values:
+        original_dictionary.update(new_values)
+
+    original_dictionary.update(kwargs)
+
+    return original_dictionary
