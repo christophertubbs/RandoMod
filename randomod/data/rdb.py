@@ -114,7 +114,7 @@ class ToDayTransformation(FrameTransformation):
         if self.__month_column and self.__day_column:
             month_number = row[self.__month_column]
             day_number = row[self.__day_column]
-            return Day(month_number=month_number, day_number=day_number)
+            return Day(month_number=month_number, day_of_month_number=day_number)
         return Day(row[self.__date_column])
 
 
