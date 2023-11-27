@@ -33,10 +33,15 @@ class DayTests(unittest.TestCase):
     def test_creation(self):
         test_day = datetime(year=2023, month=11, day=24)
 
+        # The test day isn't on a leap year and is after February 21st. This has to be shifted to account for that
+        # extra day. This is only needed when giving an absolute day number
+        absolute_leap_year_day = int(test_day.strftime("%j")) + 1
+
         day_from_string = Day(f'{test_day.year}-{test_day.month}-{test_day.day}')
         day_from_short_dict = Day({'day': test_day.day, 'month': test_day.month})
         day_from_full_dict = Day({"day": test_day.day, "month": str(test_day.month), "year": str(test_day.year)})
-        day_from_day_int_dict = Day({"day": int(test_day.strftime("%j"))})
+
+        day_from_day_int_dict = Day({"day": absolute_leap_year_day})
         day_from_month_abbreviation_dict = Day(
             {
                 "day": test_day.day,
@@ -45,13 +50,14 @@ class DayTests(unittest.TestCase):
             }
         )
         day_from_month_name_dict = Day({"day": test_day.day, "month": test_day.strftime("%B")})
-        day_from_int = Day(int(test_day.strftime("%j")))
+
+        day_from_int = Day(absolute_leap_year_day)
 
         day_from_datetime = Day(test_day)
         day_from_timestamp = Day.from_epoch(1700855463.340028)
         day_from_datetime64 = Day(datetime64(test_day))
         day_from_pandas_timestamp = Day(Timestamp(test_day))
-        day_from_single_value_sequence = Day([328.4])
+        day_from_single_value_sequence = Day([329.4])
         day_from_two_value_sequence = Day([11, 24])
         day_from_three_value_sequence = Day([2023, 11, 24])
 
@@ -72,10 +78,9 @@ class DayTests(unittest.TestCase):
             day_from_three_value_sequence
         ]
 
-        # FIXME: Test does not pass
         self.assertTrue(all_are_equal(all_days))
 
-        self.assertTrue(all([day.day_number == 328 for day in all_days]))
+        self.assertTrue(all([day.day_number == 329 for day in all_days]))
 
 
 if __name__ == '__main__':
