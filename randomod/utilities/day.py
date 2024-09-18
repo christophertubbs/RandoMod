@@ -15,6 +15,9 @@ from dateutil.parser import parse as parse_date
 from randomod.utilities import is_sequence_type
 from randomod.utilities import value_is_number
 
+VT = typing.TypeVar('VT')
+"""A value type"""
+
 
 DATE_DICTIONARY = typing.Dict[
     typing.Union[
@@ -39,7 +42,6 @@ DATE_REPRESENTATION_TYPE = typing.Union[
     typing.Sequence[typing.Union[str, int, float]]
 ]
 """The types of objects that may refer to a day"""
-
 
 class Day:
     """
@@ -288,4 +290,47 @@ class Day:
         return self.__day < other.day_number
 
     def __hash__(self):
-        return hash(self.__repr__())
+        return hash(self.__day)
+
+
+class DayDict(dict[Day, VT], typing.Generic[VT]):
+    """
+    A dictionary that keys on day
+
+    The keys can be any type that can be converted into a Day, so if data is stored by key,
+    it may still be accessed via a datetime or pandas Timestamp
+    """
+    def __init__(
+        self,
+        *args: typing.Tuple[DATE_REPRESENTATION_TYPE, VT],
+        **kwargs: typing.Mapping[DATE_REPRESENTATION_TYPE, VT]
+    ) -> None:
+        super().__init__()
+
+        for raw_key, value in args:
+            self[raw_key] = value
+
+        for raw_key, value in kwargs.items():
+            self[raw_key] = value
+
+    def __setitem__(self, raw_key: DATE_REPRESENTATION_TYPE, value: VT) -> None:
+        try:
+            if isinstance(raw_key, Day):
+                key = raw_key
+            else:
+                key = Day(raw_key)
+        except Exception as exception:
+            raise TypeError(f"{raw_key} cannot be turned into a Day object") from exception
+
+        super().__setitem__(key, value)
+
+    def __getitem__(self, raw_key: DATE_REPRESENTATION_TYPE) -> VT:
+        try:
+            if isinstance(raw_key, Day):
+                key = raw_key
+            else:
+                key = Day(raw_key)
+        except Exception as exception:
+            raise TypeError(f"{raw_key} cannot be turned into a Day object") from exception
+
+        return super().__getitem__(key)

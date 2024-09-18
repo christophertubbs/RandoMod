@@ -2,19 +2,24 @@
 Tests used to make sure that model calculations and the run model function work correctly
 """
 import functools
+import itertools
+import os
 import typing
 import unittest
 import random
+from concurrent import futures
 
 from datetime import datetime
 from datetime import timedelta
 
 import pandas
 
+from randomod.schema.variance import ThresholdAdjustment
 from randomod.schema.variance import Variance
 from randomod import model
 
 import test.utility
+from randomod.utilities import Day
 from randomod.utilities import get_unique_sequence_values
 
 START_DATE = datetime(year=2023, month=10, day=8, hour=12)
@@ -49,6 +54,8 @@ LOCATIONS = [
     for index in range(1, 201)
 ]
 """The locations to generate data for"""
+
+OVERFLOW_THRESHOLD_INDEX = 999
 
 test.utility.apply_seed()
 
@@ -403,157 +410,340 @@ def make_multiple_location_test_dataframe(
     return final_frame
 
 
+def create_thresholds_for_location(
+    location: str,
+    location_column: str,
+    lower_wobble: float,
+    upper_wobble: float,
+    day_column: str,
+    threshold_names: typing.Sequence[str],
+    random_number_generator: random.Random
+) -> typing.List[typing.Dict[str, typing.Union[float, str]]]:
+    thresholds: typing.List[typing.Dict[str, typing.Union[float, str]]] = []
+
+    initial_threshold_value: float = random_number_generator.uniform(MINIMUM_VALUE, MAXIMUM_VALUE)
+    increase_amount: float = random_number_generator.uniform(
+        initial_threshold_value + lower_wobble,
+        initial_threshold_value + upper_wobble
+    )
+    prior_threshold_value = None
+    for day_number in range(1, 366):
+        thresholds_for_location = {
+            location_column: location,
+            day_column: Day(day_number),
+        }
+
+        for threshold_name in threshold_names:
+            if prior_threshold_value is None:
+                prior_threshold_value = initial_threshold_value + random_number_generator.uniform(
+                    lower_wobble,
+                    upper_wobble
+                )
+            else:
+                prior_threshold_value += random_number_generator.uniform(
+                    increase_amount + lower_wobble,
+                    increase_amount + upper_wobble
+                )
+            thresholds_for_location[threshold_name] = prior_threshold_value
+
+        thresholds.append(thresholds_for_location)
+        prior_threshold_value = None
+    return thresholds
+
+def make_context_free_thresholds(
+    location_column: str,
+    day_column: str,
+    threshold_names: typing.Sequence[str],
+    random_number_generator: random.Random
+):
+    generation_start_time: datetime = datetime.now()
+    thresholds: typing.List[typing.Dict[str, typing.Union[float, str]]] = []
+    lower_wobble: float = -1.5
+    upper_wobble: float = 1.5
+
+    with futures.ProcessPoolExecutor() as executor:
+        process_list: typing.List[futures.Future] = [
+            executor.submit(
+                create_thresholds_for_location,
+                location,
+                location_column,
+                lower_wobble,
+                upper_wobble,
+                day_column,
+                threshold_names,
+                random_number_generator
+            )
+            for location in LOCATIONS
+        ]
+
+        while process_list:
+            process: futures.Future = process_list.pop()
+            if process.done():
+                thresholds.extend(process.result())
+            else:
+                process_list.append(process)
+
+    print(f"Context free thresholds generated in {datetime.now() - generation_start_time}")
+    return pandas.DataFrame(thresholds)
+
+
+def get_threshold_for_value(row: pandas.Series) -> str:
+    value = row['value']
+    thresholds = (
+        (threshold_name, row[threshold_name])
+        for threshold_name in [name for name in row.index.values if name.lower().startswith('threshold')]
+    )
+
+    previous_maximum: float = 0.0
+    threshold_name: str = ""
+    for threshold_name, threshold_value in thresholds:
+        if previous_maximum < value <= threshold_value:
+            break
+        previous_maximum = threshold_value
+
+    return threshold_name
+
+
+def determine_threshold_index(row: pandas.Series, value_column_name: str, threshold_names: typing.List[str]) -> int:
+    possible_thresholds = sorted([
+        (threshold_index, row[name])
+        for threshold_index, name in enumerate(threshold_names)
+        if name in row
+           and row[name] > row[value_column_name]
+    ], key=lambda pair: pair[1])
+    if possible_thresholds:
+        return possible_thresholds[0][0]
+    return OVERFLOW_THRESHOLD_INDEX
+
+
+def verify_value_variance(
+    row: pandas.Series,
+    variance_column: str,
+    control_threshold_column: str,
+    simulation_threshold_column: str
+) -> bool:
+    variance = row[variance_column]
+    control_threshold_index = row[control_threshold_column]
+    simulation_threshold_index = row[simulation_threshold_column]
+
+    if variance == ThresholdAdjustment.STAY:
+        return control_threshold_index == simulation_threshold_index
+    elif variance == ThresholdAdjustment.PREVIOUS:
+        return control_threshold_index > simulation_threshold_index or control_threshold_index == 0 and simulation_threshold_index == 0
+
+    return control_threshold_index < simulation_threshold_index or control_threshold_index == OVERFLOW_THRESHOLD_INDEX and simulation_threshold_index == 999
+
+
 class TestModel(unittest.TestCase):
     value_column: str
     location_column: str
     time_column: str
+    day_column: str
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.value_column = "value"
         cls.time_column = "valid_date"
         cls.location_column = "location"
+        cls.day_column = "day"
+        cls.control_threshold_column = "control_threshold"
+        cls.simulation_threshold_column = "simulation_threshold"
+        cls.simulation_variance_column = "simulation_variance"
+        cls.simulation_suffix = "_sim"
+        cls.control_suffix = "_control"
+        cls.sim_control_suffix = cls.simulation_suffix, cls.control_suffix
 
         random_number_generator = random.Random(test.utility.RANDOM_VALUE_SEED)
+        control_random_number_generator = random.Random(853).randint(57, 107)
 
-        cls.variance = Variance.create_random_variance(
+        cls.control_variance = Variance.create_random_variance(
+            start_date=START_DATE,
+            end_date=END_DATE,
+            random_number_generator=control_random_number_generator
+        )
+
+        cls.simulation_variance = Variance.create_random_variance(
             start_date=START_DATE,
             end_date=END_DATE,
             random_number_generator=random_number_generator
         )
 
         cls.threshold_names = [f"threshold_{index}" for index in range(1, THRESHOLD_COUNT + 1)]
-        print(f"[{cls.__class__.__name__}.setUp] Constructing Test Data")
-        print(f"[{cls.__class__.__name__}.setUp] Constructing Single location input")
+        cls.control_threshold_finder = functools.partial(
+            determine_threshold_index,
+            value_column_name=cls.value_column,
+            threshold_names=cls.threshold_names
+        )
+        cls.simulation_threshold_finder = functools.partial(
+            determine_threshold_index,
+            value_column_name=cls.value_column + cls.simulation_suffix,
+            threshold_names=cls.threshold_names
+        )
+        cls.value_variance_verifier = functools.partial(
+            verify_value_variance,
+            variance_column=cls.simulation_variance_column,
+            control_threshold_column=cls.control_threshold_column,
+            simulation_threshold_column=cls.simulation_threshold_column
+        )
 
-        cls.single_location_calculation_input = make_single_test_dataframe(
-            location=LOCATIONS[0],
-            value_column=cls.value_column,
+        cls.thresholds = make_context_free_thresholds(
             location_column=cls.location_column,
-            time_column=cls.time_column,
+            day_column=cls.day_column,
+            threshold_names=cls.threshold_names,
             random_number_generator=random_number_generator
         )
 
-        print(f"[{cls.__class__.__name__}.setUp] Constructing multiple location input")
-        cls.multiple_location_calculation_input = make_multiple_location_test_dataframe(
-            value_column=cls.value_column,
-            location_column=cls.location_column,
-            time_column=cls.time_column,
-            random_number_generator=random_number_generator
-        )
+        print(f"[{cls.__qualname__}.setUpClass] Constructing Test Data")
+        print(f"[{cls.__qualname__}.setUpClass] Constructing Single location input")
 
-        print(f"[{cls.__class__.__name__}.setUp] Constructing Single location input with timed thresholds")
-        cls.timed_single_location_calculation_input = make_single_test_dataframe(
+        single_location_model_rows = model.calculate_from_scratch(
+            thresholds=cls.thresholds[cls.thresholds[cls.location_column] == LOCATIONS[0]],
+            threshold_names=cls.threshold_names,
+            variance=cls.control_variance,
             location=LOCATIONS[0],
+            start=START_DATE,
+            end=END_DATE,
+            period=RESOLUTION,
             value_column=cls.value_column,
             location_column=cls.location_column,
+            day_column=cls.day_column,
             time_column=cls.time_column,
-            random_number_generator=random_number_generator,
-            by_time=True
+            random_number_generator=control_random_number_generator
         )
 
-        print(f"[{cls.__class__.__name__}.setUp] Constructing multiple location input with timed thresholds")
-        # 1 pretend dollar to whoever speeds this call up
-        cls.timed_multiple_location_calculation_input = make_multiple_location_test_dataframe(
+        single_location_model = pandas.DataFrame(single_location_model_rows)
+        single_location_model.reset_index(inplace=True)
+        single_location_model[cls.day_column] = single_location_model[cls.time_column].apply(Day)
+
+        cls.single_location_calculation_input = pandas.merge(
+            single_location_model,
+            cls.thresholds,
+            how='inner',
+            on=[cls.location_column, cls.day_column]
+        ).set_index(cls.location_column)
+
+        cls.single_location_calculation_input[cls.control_threshold_column] = cls.single_location_calculation_input.apply(
+            cls.control_threshold_finder,
+            axis=1
+        )
+
+        print(f"[{cls.__qualname__}.setUpClass] Constructing multiple location input")
+        multiple_location_data = model.run_model_from_scratch(
+            thresholds=cls.thresholds,
+            threshold_names=cls.threshold_names,
+            variance=cls.control_variance,
+            start=START_DATE,
+            end=END_DATE,
+            period=RESOLUTION,
+            time_column=cls.time_column,
             value_column=cls.value_column,
             location_column=cls.location_column,
-            time_column=cls.time_column,
-            random_number_generator=random_number_generator,
-            by_time=True
+            day_column=cls.day_column,
+            random_number_generator=test.utility.RANDOM_VALUE_SEED
         )
 
-        print(f"[{cls.__class__.__name__}] Test data has been prepared")
+        multiple_location_data[cls.day_column] = multiple_location_data[cls.time_column].apply(Day)
 
-    def test_calculate_values(cls):
+        cls.multiple_location_calculation_input = pandas.merge(
+            multiple_location_data,
+            cls.thresholds,
+            how="inner",
+            on=[cls.location_column, cls.day_column]
+        ).set_index(cls.location_column)
+
+        print(f"[{cls.__qualname__}] Test data has been prepared")
+
+    def test_calculate_values_from_scratch(self) -> None:
+        self.assertEqual((END_DATE - START_DATE) / RESOLUTION, len(self.single_location_calculation_input))
+        self.assertIn(self.time_column, self.single_location_calculation_input)
+        self.assertIn(self.value_column, self.single_location_calculation_input)
+        self.assertIn(
+            self.location_column,
+            [*self.single_location_calculation_input.columns, *self.single_location_calculation_input.index.names]
+        )
+
+    def test_multi_location_calculation_from_scratch(self) -> None:
+        self.assertEqual(
+            ((END_DATE - START_DATE) / RESOLUTION) * len(LOCATIONS), len(self.multiple_location_calculation_input)
+        )
+        self.assertIn(self.time_column, self.multiple_location_calculation_input)
+        self.assertIn(self.value_column, self.multiple_location_calculation_input)
+        self.assertIn(
+            self.location_column,
+            [
+                *self.multiple_location_calculation_input.columns,
+                *self.multiple_location_calculation_input.index.names
+            ]
+        )
+
+    def test_calculate_values(self):
         test.utility.apply_seed()
-        generated_data = model.calculate_values(
-            group=cls.single_location_calculation_input,
-            threshold_names=cls.threshold_names,
-            variance=cls.variance,
+        simulation = model.calculate_model_values(
+            group=self.single_location_calculation_input,
+            threshold_names=self.threshold_names,
+            variance=self.simulation_variance,
             location=LOCATIONS[0],
-            location_column=cls.location_column,
-            time_column=cls.time_column,
-            value_column=cls.value_column,
+            time_column=self.time_column,
+            value_column=self.value_column,
             random_number_generator=test.utility.RANDOM_VALUE_SEED
         )
 
-        simulation = pandas.DataFrame(generated_data).set_index(cls.location_column)
+        self.assertEqual((END_DATE - START_DATE) / RESOLUTION, len(simulation))
+        self.assertEqual(self.single_location_calculation_input.shape[0], simulation.shape[0])
 
-        cls.assertEqual(cls.single_location_calculation_input.shape[0], simulation.shape[0] + 1)
+        combined_frames: pandas.DataFrame = pandas.merge(
+            simulation,
+            self.single_location_calculation_input,
+            how="inner",
+            suffixes=self.sim_control_suffix,
+            on=[self.location_column, self.time_column]
+        ).set_index([self.time_column])
 
-        values = simulation[cls.value_column]
-        minimum = values.min()
-        maximum = values.max()
-        summed_values = values.sum()
-        mean_error = (values - cls.single_location_calculation_input[cls.value_column]).mean()
-        median = values.median()
-        mean = values.mean()
-        std = values.std()
-        cls.assertAlmostEqual(mean_error, -2.3582806954098, EPSILON_DIGITS)
-        cls.assertAlmostEqual(minimum, 17.573044169399243, EPSILON_DIGITS)
-        cls.assertAlmostEqual(maximum, 144.0720234370857, EPSILON_DIGITS)
-        cls.assertAlmostEqual(median, 77.2989369636704, EPSILON_DIGITS)
-        cls.assertAlmostEqual(mean, 79.51445807678013, EPSILON_DIGITS)
-        cls.assertAlmostEqual(summed_values, 59158.75680912442, EPSILON_DIGITS)
-        cls.assertAlmostEqual(std, 38.66943581335177, EPSILON_DIGITS)
+        combined_frames[self.simulation_variance_column] = self.simulation_variance.to_frame(RESOLUTION).set_index(self.time_column)['adjustment']
+        combined_frames[self.simulation_threshold_column] = combined_frames.apply(self.simulation_threshold_finder, axis=1)
+        variance_is_correct = combined_frames.apply(self.value_variance_verifier, axis=1)
 
-        del simulation
+        with pandas.option_context('display.max_columns', None, 'display.width', 500):
+            incorrect_variance = combined_frames[variance_is_correct == False]
+            message = (
+                f"Variance was not correctly used "
+                f"{len(variance_is_correct[variance_is_correct == False]) / len(variance_is_correct) * 100.0:.2f}% "
+                f"of the time{os.linesep}{repr(incorrect_variance)}"
+            )
+            self.assertTrue(variance_is_correct.all(), message)
 
-    def test_run_model(cls):
+    def test_run_model(self):
         single_location_simulation = model.run_model(
-            control_and_thresholds=cls.single_location_calculation_input,
-            threshold_names=cls.threshold_names,
-            variance=cls.variance,
-            time_column=cls.time_column,
-            location_column=cls.location_column,
-            value_column=cls.value_column,
+            control_and_thresholds=self.single_location_calculation_input,
+            threshold_names=self.threshold_names,
+            variance=self.simulation_variance,
+            time_column=self.time_column,
+            location_column=self.location_column,
+            value_column=self.value_column,
             random_number_generator=test.utility.RANDOM_VALUE_SEED
         )
 
-        cls.assertEqual(cls.single_location_calculation_input.shape[0], single_location_simulation.shape[0] + 1)
-
+        self.assertEqual((END_DATE - START_DATE) / RESOLUTION, len(single_location_simulation))
+        self.assertEqual(self.single_location_calculation_input.shape[0], single_location_simulation.shape[0])
         del single_location_simulation
 
         multiple_location_simulation = model.run_model(
-            cls.multiple_location_calculation_input,
-            threshold_names=cls.threshold_names,
-            variance=cls.variance,
-            time_column=cls.time_column,
-            location_column=cls.location_column,
-            value_column=cls.value_column,
+            self.multiple_location_calculation_input,
+            threshold_names=self.threshold_names,
+            variance=self.simulation_variance,
+            time_column=self.time_column,
+            location_column=self.location_column,
+            value_column=self.value_column,
             random_number_generator=test.utility.RANDOM_VALUE_SEED
         )
-
-        cls.assertEqual(
-            cls.multiple_location_calculation_input.shape[0],
-            multiple_location_simulation.shape[0] + len(LOCATIONS)
+        self.assertEqual(
+            ((END_DATE - START_DATE) / RESOLUTION) * len(LOCATIONS), len(multiple_location_simulation)
         )
 
-        del multiple_location_simulation
-
-        timed_single_location_simulation = model.run_model(
-            control_and_thresholds=cls.timed_single_location_calculation_input,
-            threshold_names=cls.threshold_names,
-            variance=cls.variance,
-            time_column=cls.time_column,
-            location_column=cls.location_column,
-            value_column=cls.value_column,
-            random_number_generator=test.utility.RANDOM_VALUE_SEED
+        self.assertEqual(
+            self.multiple_location_calculation_input.shape[0],
+            multiple_location_simulation.shape[0]
         )
-
-        del timed_single_location_simulation
-
-        timed_multiple_location_simulation = model.run_model(
-            cls.timed_multiple_location_calculation_input,
-            threshold_names=cls.threshold_names,
-            variance=cls.variance,
-            time_column=cls.time_column,
-            location_column=cls.location_column,
-            value_column=cls.value_column,
-            random_number_generator=test.utility.RANDOM_VALUE_SEED
-        )
-
-
 
 
 if __name__ == '__main__':

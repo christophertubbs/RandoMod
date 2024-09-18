@@ -27,14 +27,14 @@ class ThresholdAdjustment(str, enum.Enum):
     PREVIOUS = "previous"
 
     @classmethod
-    def random(cls, random_number_generator: typing.Union[Random, int] = None) -> ThresholdAdjustment:
+    def random(cls, random_number_generator: typing.Union[Random, int] = None) -> str:
         if random_number_generator is None or isinstance(random_number_generator, int):
             random_number_generator = Random(random_number_generator)
 
         if not isinstance(random_number_generator, Random):
             random_number_generator = random.Random()
 
-        return random_number_generator.choice([value for value in cls])
+        return random_number_generator.choices(list(cls), weights=[1, 3, 1], k=1)[0]
 
 
 class VarianceEntry(BaseModel):
@@ -44,6 +44,31 @@ class VarianceEntry(BaseModel):
     start_date: datetime
     end_date: datetime
     threshold_adjustment: ThresholdAdjustment
+
+    def to_rows(self, resolution: timedelta = timedelta(hours=1)) -> typing.List[typing.Dict[str, typing.Union[str, datetime]]]:
+        rows: typing.List[typing.Dict[str, typing.Union[str, datetime]]] = []
+
+        if resolution.total_seconds() % 86400 == 0:
+            # Truncate the date to the day
+            current_time: datetime = self.start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif resolution.total_seconds() % 3600 == 0:
+            # Truncate the date to the hour
+            current_time: datetime = self.start_date.replace(minute=0, second=0, microsecond=0)
+        elif resolution.total_seconds() % 60 == 0:
+            # Truncate the date to the nearest minute
+            current_time: datetime = self.start_date.replace(second=0, microsecond=0)
+        else:
+            current_time: datetime = self.start_date.replace(microsecond=0)
+
+        while current_time < self.end_date:
+            current_time += resolution
+
+            rows.append({
+                "valid_date": current_time,
+                "adjustment": self.threshold_adjustment.value,
+            })
+
+        return rows
 
     def __str__(self):
         start_date = self.start_date.strftime(get_datetime_format(self.start_date.tzinfo))
@@ -77,6 +102,14 @@ class Variance(BaseModel):
                 return entry
 
         return None
+
+    def to_frame(self, resolution: timedelta = timedelta(hours=1)) -> pandas.DataFrame:
+        rows: typing.List[typing.Dict[str, typing.Union[str, datetime]]] = []
+
+        for entry in self.entries:
+            rows.extend(entry.to_rows(resolution=resolution))
+
+        return pandas.DataFrame(rows)
 
     @classmethod
     def create_random_variance(

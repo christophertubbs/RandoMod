@@ -134,7 +134,8 @@ class RDBTable:
         creation_kwargs = {
             "na_values": [
                 "Dis",          # Record has been discontinued at the measurement site.
-                "Rat"           # Rating being developed
+                "Rat",          # Rating being developed
+                "Mnt",          # Site undergoing maintenance
             ]
         }
 
@@ -151,7 +152,7 @@ class RDBTable:
         )
 
         for transformation in self.post_processing_functions:
-            frame = transformation(frame=frame)
+            frame = transformation(frame)
 
         return frame
 

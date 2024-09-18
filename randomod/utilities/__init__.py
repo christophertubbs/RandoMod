@@ -7,3 +7,4 @@ from .common import get_unique_sequence_values
 from .common import merge
 
 from .day import Day
+from .day import DayDict
