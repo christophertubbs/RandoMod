@@ -19,7 +19,7 @@ from randomod.schema.variance import Variance
 from randomod import model
 
 import test.utility
-from randomod.utilities import Day
+from onlyday import Day
 from randomod.utilities import get_unique_sequence_values
 
 START_DATE = datetime(year=2023, month=10, day=8, hour=12)

@@ -22,7 +22,7 @@ from dateutil.parser import parse as parse_date
 from dateutil.tz import gettz
 from pandas._typing import ReadCsvBuffer
 
-from randomod.utilities.day import Day
+from onlyday import Day
 
 SITE_TIMESERIES_ROW: re.Pattern = re.compile(r"# Data provided for site (?P<site_code>\d+)\s*")
 PARAMETER_CODE_PATTERN: re.Pattern = re.compile(r"#\s+\d+\s+(?P<pcode>\d{5})\s+(?P<description>.+)")

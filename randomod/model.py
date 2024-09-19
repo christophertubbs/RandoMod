@@ -18,7 +18,7 @@ import pandas
 from randomod.schema.variance import ThresholdAdjustment
 from randomod.schema.variance import Variance
 from randomod.schema.variance import VarianceEntry
-from randomod.utilities import DayDict
+from onlyday import DayDict
 
 BOUND_SECTION_COUNT = 8
 BOUND_DISTANCE = BOUND_SECTION_COUNT // 3
